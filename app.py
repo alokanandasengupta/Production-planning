@@ -12,6 +12,9 @@ import hashlib
 from typing import Dict, List, Any, Tuple, Optional
 
 # Import dependencies with error handling
+# Every optional library is wrapped like this on purpose: the app has to boot
+# even on a machine where only some of these packages got installed, so a
+# missing package should just turn a feature off, not crash the whole app.
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
@@ -88,6 +91,8 @@ st.set_page_config(
 # Authentication Functions
 def check_email_domain(email: str) -> bool:
     """Check if email belongs to authorized domain"""
+    # @gmail.com and @example.com are in here as placeholders for dev and
+    # demo logins, swap these for the real production domain list.
     authorized_domains = ['@hoichoi.tv', '@gmail.com', '@example.com']  # Add your authorized domains
     return any(email.lower().strip().endswith(domain) for domain in authorized_domains)
 
@@ -149,6 +154,9 @@ def authenticate_user():
                 if st.button("🚀 Login", type="primary", use_container_width=True):
                     if email and password:
                         if check_email_domain(email):
+                            # This is just a length gate, not a real password check
+                            # against any stored credential. Access control here is
+                            # really coming from the email domain check above.
                             if len(password) >= 6:
                                 st.session_state.authenticated = True
                                 st.session_state.user_email = email
@@ -183,12 +191,19 @@ def safe_unicode_text(text):
             text = str(text)
         
         # Remove problematic characters
+        # These invisible characters show up a lot in OCR output from Bengali and
+        # other Indic scripts, they don't render as anything but they can break
+        # downstream JSON parsing and regex matching, so strip them before the
+        # text goes anywhere else.
         text = text.replace('\u200b', '')  # Zero-width space
         text = text.replace('\ufeff', '')  # BOM
         text = text.replace('\u200c', '')  # Zero-width non-joiner
         text = text.replace('\u200d', '')  # Zero-width joiner
-        
+
         # Normalize Unicode
+        # NFC keeps combining marks and base characters in one canonical form,
+        # otherwise the same visible character can compare unequal to itself
+        # depending on which app produced the text.
         import unicodedata
         text = unicodedata.normalize('NFC', text)
         
@@ -200,6 +215,9 @@ def safe_unicode_text(text):
 # API Key Management
 def get_api_key():
     """Get OpenAI API key from Streamlit secrets or user input"""
+    # st.secrets raises if no secrets.toml exists at all, not just when the key
+    # is missing from it, so the try/except covers "no secrets file configured"
+    # rather than being defensive against a real error condition.
     try:
         return st.secrets.get("OPENAI_API_KEY", None)
     except:
@@ -214,6 +232,9 @@ def get_mistral_api_key():
 
 def get_mistral_api_key_with_session():
     """Get Mistral API key with session state support"""
+    # A key typed into the UI this session should win over whatever is in
+    # secrets.toml, that is what lets someone test OCR locally without ever
+    # touching the deployed secrets file.
     if hasattr(st.session_state, 'temp_mistral_key') and st.session_state.temp_mistral_key:
         return st.session_state.temp_mistral_key
     try:
@@ -244,6 +265,8 @@ def check_mistral_ocr_availability():
             "Authorization": f"Bearer {mistral_key}"
         }
         
+        # Hitting /v1/models is just a cheap way to confirm the key works, it
+        # doesn't cost OCR credits the way an actual OCR call would.
         response = requests.get("https://api.mistral.ai/v1/models", headers=headers, timeout=10)
         
         if response.status_code == 200:
@@ -282,6 +305,10 @@ def upload_file_to_mistral(file_data: bytes, filename: str, mistral_key: str) ->
             "Authorization": f"Bearer {mistral_key}"
         }
         
+        # The content type is guessed from the file extension since the caller
+        # only ever hands us raw bytes plus a filename, nothing tells us the
+        # real MIME type. Defaulting to PNG for anything that isn't jpg/jpeg
+        # is a simplification, most of the upload paths in this app are jpg or png.
         files = {
             "file": (filename, file_data, "image/jpeg" if filename.lower().endswith(('.jpg', '.jpeg')) else "image/png")
         }
@@ -335,6 +362,10 @@ def get_mistral_ocr_result(file_id: str, mistral_key: str, language: str = "ben+
             result = response.json()
             extracted_text = ""
             
+            # Mistral's OCR response doesn't consistently use one field name for
+            # the extracted text, so we check a few known possibilities before
+            # falling back to scanning the whole response for anything that
+            # looks like text below.
             if "text" in result:
                 extracted_text = result["text"]
             elif "content" in result:
@@ -399,6 +430,9 @@ def extract_text_with_mistral_ocr(image_file, language: str = "ben+eng", progres
             progress_callback(0.5, f"🔍 Processing OCR with Mistral (Language: {language})...")
         
         # Add delay for file processing
+        # Requesting OCR results immediately after upload can race Mistral's own
+        # ingestion of the file, this pause gives it a moment to finish before
+        # we ask for the result.
         time.sleep(3)
         
         if progress_callback:
@@ -505,8 +539,11 @@ IMPORTANT: Only process the content in this specific chunk. Don't make assumptio
     def chunk_text_for_processing(self, text: str, max_tokens: int = 6000) -> List[str]:
         """Split text into chunks that fit within token limits"""
         # Account for system prompt and response tokens
+        # The 1500-token reserve covers the system prompt plus room for GPT-4's
+        # reply, if we filled the whole budget with script text there would be
+        # nothing left for the model to answer with.
         available_tokens = max_tokens - 1500  # Reserve tokens for system prompt and response
-        max_chars = available_tokens * 4  # Rough conversion
+        max_chars = available_tokens * 4  # Rough conversion, about 4 characters per token for English text
         
         if len(text) <= max_chars:
             return [text]
